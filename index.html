@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>리락쿠마의 방탈출</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body {
+            background-color: #030203;
+            color: #d1c7bd;
+            font-family: 'Courier New', Courier, monospace, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        #game-container {
+            position: relative;
+            width: 900px;
+            height: 600px;
+            box-shadow: 0 0 50px rgba(0, 0, 0, 0.98), 0 0 20px rgba(130, 10, 10, 0.5);
+            border: 2px solid #221111;
+            background-color: #000;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas" width="900" height="600"></canvas>
+</div>
+
+<script>
+(() => {
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Audio Elements
+    const audioBgm = new Audio('bgm.ogg');
+    audioBgm.loop = true;
+    const audioError = new Audio('error.ogg');
+    const audioKeyboard = new Audio('keyboard.ogg');
+
+    let isMuted = false;
+    let audioStarted = false;
+    let isPaused = false;
+
+    function playSound(audioObj, forceRestart = true) {
+        if (isMuted || !audioStarted) return;
+        try {
+            if (forceRestart) audioObj.currentTime = 0;
+            let p = audioObj.play();
+            if (p && p.catch) p.catch(() => {});
+        } catch(e) {}
+    }
+
+    function playBgm() {
+        if (isMuted || !audioStarted || isPaused) return;
+        try {
+            let p = audioBgm.play();
+            if (p && p.catch) p.catch(() => {});
+        } catch(e) {}
+    }
+
+    function stopBgm() {
+        try {
+            audioBgm.pause();
+            audioBgm.currentTime = 0;
+        } catch(e) {}
+    }
+
+    // Image Element & Fallback
+    const rilakkumaImg = new Image();
+    let isRilakkumaImgLoaded = false;
+    rilakkumaImg.onload = () => { isRilakkumaImgLoaded = true; };
+    rilakkumaImg.src = 'bunny_jump.ogg';
+
+    // Game States: 'HOME', 'PLAY', 'GAMEOVER', 'CLEAR', 'FINAL_CLEAR'
+    let gameState = 'HOME';
+    let currentRound = 1;
+    let timeRemaining = 600;
+    let timerInterval = null;
+    let currentRoom = 1;
+
+    // Pointer Cursor Position
+    let pointer = { x: 450, y: 300, speed: 8 };
+    let keysPressed = {};
+
+    // Dynamic Variables for Round 1 Randomization
+    let r1ClockTime = 4;        // 시계 시간 (4시)
+    let r1Multiplier = 3;       // UV 힌트 멀티플라이어
+    let r1HatchCount = 7;       // 지하실 핏빛 빗금 개수 (7개)
+
+    // Calculated Passcode for Round 1
+    let r1Digit1 = (r1ClockTime * r1Multiplier) % 10;                     // (4 * 3) = 12 -> 2
+    let r1Digit2 = (r1HatchCount * 7) % 10;                               // (7 * 7) = 49 -> 9
+    let r1Digit3 = (r1ClockTime + r1HatchCount) % 10;                     // (4 + 7) = 11 -> 1
+    let r1Digit4 = (r1Digit1 + r1Digit2 + r1Digit3) % 10;                 // (2 + 9 + 1) = 12 -> 2
+    let r1Passcode = `${r1Digit1}${r1Digit2}${r1Digit3}${r1Digit4}`;      // "2912"
+
+    // Round 2 Dynamic State
+    let round2ColorInputs = [];
+
+    // Overlay State Variables
+    let enteredPasscode = "";
+    let activeOverlay = null; // 'KEYPAD', 'COLOR_PAD', 'DOOR_LOCK', 'INSPECT', 'MESSAGE', 'MENU', 'JUMPSCARE'
+    let overlayText = "";
+    let jumpscareTimer = 0;
+    let jumpscareScale = 1;
+    let shakeOffset = { x: 0, y: 0 };
+
+    // Inventory & Game Flags
+    let inventory = [];
+    let flags = {};
+
+    function initRound(rd) {
+        enteredPasscode = "";
+        round2ColorInputs = [];
+
+        inventory = [];
+        flags = {
+            // Round 1 Flags
+            hasIronKey: false,
+            hasUVTorch: false,
+            trapDeskOpened: false,
+
+            // Round 2 Flags
+            hasColorKey: false,
+            musicBoxSet: false,
+
+            // Round 3 Flags
+            switch1Pressed: false,
+            hasPhotoA: false,
+            hasPhotoB: false,
+
+            // Common Flags
+            basementBoxUnlocked: false,
+            hasDango: false,
+            hasRealRilakkuma: false,
+            hasExitKey: false
+        };
+
+        if (rd === 1) timeRemaining = 600;
+        else if (rd === 2) timeRemaining = 480;
+        else timeRemaining = 360;
+
+        currentRoom = 1;
+        pointer.x = 450;
+        pointer.y = 300;
+        isPaused = false;
+    }
+
+    function startTimer() {
+        clearInterval(timerInterval);
+        timerInterval = setInterval(() => {
+            if (gameState === 'PLAY' && !isPaused && !activeOverlay) {
+                timeRemaining--;
+                if (timeRemaining <= 0) {
+                    timeRemaining = 0;
+                    triggerGameOver();
+                }
+            }
+        }, 1000);
+    }
+
+    function triggerGameOver() {
+        gameState = 'GAMEOVER';
+        stopBgm();
+        playSound(audioError, true);
+        clearInterval(timerInterval);
+    }
+
+    function triggerClear() {
+        if (currentRound >= 3) {
+            gameState = 'FINAL_CLEAR';
+        } else {
+            gameState = 'CLEAR';
+        }
+        stopBgm();
+        clearInterval(timerInterval);
+    }
+
+    function startNewGame(nextRound = false) {
+        if (!nextRound) {
+            currentRound = 1;
+        } else {
+            currentRound++;
+        }
+        
+        initRound(currentRound);
+        gameState = 'PLAY';
+        audioStarted = true;
+        playBgm();
+        startTimer();
+    }
+
+    function triggerJumpscare(deductSeconds = 120, msg = "") {
+        activeOverlay = 'JUMPSCARE';
+        jumpscareTimer = 60;
+        jumpscareScale = 0.2;
+        timeRemaining = Math.max(0, timeRemaining - deductSeconds);
+        playSound(audioError, true);
+        overlayText = msg;
+    }
+
+    // Input Handling
+    window.addEventListener('keydown', (e) => {
+        if (e.repeat) return;
+        keysPressed[e.code] = true;
+        playSound(audioKeyboard, true);
+
+        if (e.code === 'Enter') {
+            if (gameState === 'HOME') {
+                startNewGame(false);
+                return;
+            }
+        }
+
+        if (e.code === 'Space') {
+            if (gameState === 'GAMEOVER' || gameState === 'FINAL_CLEAR') {
+                gameState = 'HOME';
+                currentRound = 1;
+                stopBgm();
+                return;
+            }
+            if (gameState === 'CLEAR') {
+                startNewGame(true);
+                return;
+            }
+            if (gameState === 'PLAY') {
+                handleInteraction(pointer.x, pointer.y);
+            }
+        }
+
+        if (e.code === 'KeyM' || e.code === 'Escape') {
+            if (gameState === 'PLAY') {
+                if (activeOverlay === 'MENU') {
+                    activeOverlay = null;
+                    isPaused = false;
+                    playBgm();
+                } else if (!activeOverlay) {
+                    activeOverlay = 'MENU';
+                    isPaused = true;
+                    audioBgm.pause();
+                } else {
+                    activeOverlay = null;
+                }
+            }
+        }
+    });
+
+    window.addEventListener('keyup', (e) => { delete keysPressed[e.code]; });
+
+    canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        pointer.x = (e.clientX - rect.left) * (canvas.width / rect.width);
+        pointer.y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    });
+
+    canvas.addEventListener('click', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const clickX = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const clickY = (e.clientY - rect.top) * (canvas.height / rect.height);
+
+        pointer.x = clickX;
+        pointer.y = clickY;
+
+        if (clickX >= 835 && clickX <= 885 && clickY >= 15 && clickY <= 55) {
+            if (gameState === 'PLAY') {
+                if (activeOverlay === 'MENU') {
+                    activeOverlay = null;
+                    isPaused = false;
+                    playBgm();
+                } else {
+                    activeOverlay = 'MENU';
+                    isPaused = true;
+                    audioBgm.pause();
+                }
+                return;
+            }
+        }
+
+        handleInteraction(clickX, clickY);
+    });
+
+    function updatePointerMovement() {
+        if (gameState !== 'PLAY' || isPaused) return;
+
+        if (keysPressed['ArrowLeft'] || keysPressed['KeyA']) pointer.x -= pointer.speed;
+        if (keysPressed['ArrowRight'] || keysPressed['KeyD']) pointer.x += pointer.speed;
+        if (keysPressed['ArrowUp'] || keysPressed['KeyW']) pointer.y -= pointer.speed;
+        if (keysPressed['ArrowDown'] || keysPressed['KeyS']) pointer.y += pointer.speed;
+
+        pointer.x = Math.max(10, Math.min(890, pointer.x));
+        pointer.y = Math.max(10, Math.min(590, pointer.y));
+    }
+
+    // Interactive World Mechanics
+    function handleInteraction(x, y) {
+        if (gameState === 'HOME') {
+            if (x >= 350 && x <= 550 && y >= 380 && y <= 440) startNewGame(false);
+            return;
+        }
+
+        if (activeOverlay) {
+            handleOverlayClick(x, y);
+            return;
+        }
+
+        // ROOM 1 (거실)
+        if (currentRoom === 1) {
+            if (x >= 800 && x <= 880 && y >= 200 && y <= 450) { currentRoom = 2; return; }
+            if (x >= 20 && x <= 120 && y >= 350 && y <= 480) { currentRoom = 3; return; }
+            if (x >= 380 && x <= 520 && y >= 160 && y <= 420) { activeOverlay = 'DOOR_LOCK'; return; }
+
+            // R1: 거실 UV 힌트 벽 / R2: 3색 보석 액자 / R3: 피 흔적 벽
+            if (x >= 180 && x <= 300 && y >= 120 && y <= 240) {
+                if (currentRound === 1) {
+                    if (inventory.includes('UVTorch')) {
+                        activeOverlay = 'INSPECT';
+                        overlayText = `[거실 벽 UV 후래시 비춤 단서]\n\n` +
+                            `"첫 암호 = (시계의 시간 × ${r1Multiplier})의 '일의 자리 숫자'"` +
+                            `\n\n(시계의 바늘과 서재의 찢어진 노트를 조사하세요!)`;
+                    } else {
+                        showTempMessage("아무것도 보이지 않는 벽이다.\n어둠 속을 비출 특수 빛(UV 후래시)이 필요해 보인다.");
+                    }
+                } else if (currentRound === 2) {
+                    activeOverlay = 'INSPECT';
+                    overlayText = `[액자 속 보석 순서 원본]\n\n` +
+                        `🔴 RED  ➔  🔵 BLUE  ➔  🟢 GREEN\n\n` +
+                        `※ 주의: 지하실 3색 램프 제어함 옆의 '색상 치환 법칙'을 확인하고 버튼을 누르세요!`;
+                } else {
+                    showTempMessage("거실 벽면에 의미 모를 피투성이 흔적들이 남겨져 있다.");
+                }
+                return;
+            }
+
+            // R1: 괘종시계 / R2: 9시 시계 / R3: 시계
+            if (x >= 580 && x <= 640 && y >= 100 && y <= 160) {
+                if (currentRound === 1) {
+                    if (!flags.hasIronKey) {
+                        flags.hasIronKey = true;
+                        inventory.push('IronKey');
+                        showTempMessage(`오래된 괘종시계의 바늘이 정확히 [ ${r1ClockTime}시 ]를 가리키고 있다.\n시계 뒤편 틈새에서 [녹슨 철 열쇠]를 발견하여 획득했습니다!`);
+                    } else {
+                        showTempMessage(`괘종시계의 바늘이 [ ${r1ClockTime}시 ]를 가리키고 있다.`);
+                    }
+                } else if (currentRound === 2) {
+                    showTempMessage("괘종시계의 시침이 정확히 [ 9시 ]를 가리킨 채 멈춰있다.");
+                } else {
+                    showTempMessage("오래된 시계다. 특별한 점은 보이지 않는다.");
+                }
+                return;
+            }
+
+            // 가짜 인형
+            if (x >= 680 && x <= 750 && y >= 380 && y <= 460) {
+                if (currentRound === 3 && !flags.switch1Pressed) {
+                    flags.switch1Pressed = true;
+                    showTempMessage("가짜 인형 등 뒤에서 숨겨진 [비밀 스위치 #1]을 눌렀다!\n서재에 벽 장치가 해제되는 소리가 들렸다!");
+                } else {
+                    triggerJumpscare(120, "기괴한 가짜 리락쿠마의 저주! 남은 시간 -2분!");
+                }
+                return;
+            }
+        }
+
+        // ROOM 2 (서재)
+        else if (currentRoom === 2) {
+            if (x >= 20 && x <= 90 && y >= 200 && y <= 450) { currentRoom = 1; return; }
+
+            // R1, R2, R3 책장 및 오르골
+            if (x >= 220 && x <= 380 && y >= 120 && y <= 280) {
+                if (currentRound === 1) {
+                    activeOverlay = 'INSPECT';
+                    overlayText = `[서재 책장에 떨어진 찢어진 노트]\n\n` +
+                        `비밀번호 4자리 계산 수식 규칙:\n` +
+                        `1. 첫째 자리: 거실 벽 UV 힌트 참조\n` +
+                        `2. 둘째 자리: (지하실 빗금 개수 × 7)의 '일의 자리 숫자'\n` +
+                        `3. 셋째 자리: (시계 시간 + 지하실 빗금 개수)의 '일의 자리 숫자'\n` +
+                        `4. 넷째 자리: (첫째+둘째+셋째 자리 합)의 '일의 자리 숫자'`;
+                } else if (currentRound === 2) {
+                    if (!flags.musicBoxSet) {
+                        flags.musicBoxSet = true;
+                        inventory.push('ColorKey');
+                        showTempMessage("서재의 괘종시계 시간[9시]에 맞춰 오르골 태엽을 9번 돌리자 [색상 필터 열쇠]가 나왔다!");
+                    } else {
+                        showTempMessage("오르골에서 기괴한 멜로디가 흘러나오고 있다.");
+                    }
+                } else {
+                    if (flags.switch1Pressed && !flags.hasPhotoA) {
+                        flags.hasPhotoA = true;
+                        showTempMessage("해제된 서재 비밀 벽면에서 [찢어진 사진 조각 A]를 찾았다!");
+                        checkPhotoCombine();
+                    } else if (!flags.switch1Pressed) {
+                        showTempMessage("비밀 벽면이 굳게 닫혀있다. 거실 어딘가에서 스위치를 작동시켜야 한다.");
+                    } else {
+                        showTempMessage("수색을 완료한 비밀 벽면이다.");
+                    }
+                }
+                return;
+            }
+
+            // R1: 서랍(UV 후래시) / R2, R3: 함정 서랍
+            if (x >= 500 && x <= 720 && y >= 320 && y <= 440) {
+                if (currentRound === 1) {
+                    if (!flags.hasUVTorch) {
+                        if (inventory.includes('IronKey')) {
+                            flags.hasUVTorch = true;
+                            inventory.push('UVTorch');
+                            showTempMessage("[녹슨 철 열쇠]로 서재 잠긴 서랍을 열어 [UV 후래시]를 획득했다!");
+                        } else {
+                            showTempMessage("서랍이 굳게 잠겨있다. 열쇠가 필요한 것 같다.");
+                        }
+                    } else {
+                        showTempMessage("이미 수색을 마친 열린 서랍이다.");
+                    }
+                } else {
+                    if (!flags.trapDeskOpened) {
+                        flags.trapDeskOpened = true;
+                        triggerJumpscare(150, "서랍 밑바닥에서 피투성이 가짜 인형이 튀어나왔다!");
+                    } else {
+                        showTempMessage("이미 수색을 마친 서랍이다.");
+                    }
+                }
+                return;
+            }
+        }
+
+        // ROOM 3 (지하실)
+        else if (currentRoom === 3) {
+            if (x >= 780 && x <= 860 && y >= 150 && y <= 450) { currentRoom = 1; return; }
+
+            // 상자 / 3색 램프 제어함
+            if (x >= 150 && x <= 320 && y >= 350 && y <= 460) {
+                if (!flags.basementBoxUnlocked) {
+                    if (currentRound === 2) {
+                        if (inventory.includes('ColorKey')) {
+                            activeOverlay = 'COLOR_PAD';
+                        } else {
+                            showTempMessage("3색 램프 제어함이 잠겨있다. [색상 필터 열쇠]가 필요하다.");
+                        }
+                    } else {
+                        activeOverlay = 'KEYPAD';
+                    }
+                } else {
+                    showTempMessage("이미 열린 상자다.");
+                }
+                return;
+            }
+
+            // R1: 지하실 핏빛 빗금 벽면 / R2: 색상 치환 벽 / R3: 바닥 사진 조각
+            if (x >= 400 && x <= 580 && y >= 120 && y <= 250) {
+                if (currentRound === 1) {
+                    activeOverlay = 'INSPECT';
+                    overlayText = `[지하실 벽면의 핏빛 빗금]\n\n` +
+                        `붉은 핏빛으로 그어진 빗금 표식들이 선명하게 보인다:\n\n` +
+                        `  " ///  //// "` +
+                        `\n\n(눈으로 빗금의 개수[총 ${r1HatchCount}개]를 직접 세어 수식에 적용하세요!)`;
+                } else if (currentRound === 2) {
+                    activeOverlay = 'INSPECT';
+                    overlayText = `[지하실 벽의 색상 치환 법칙]\n\n` +
+                        `액자의 원본 색상을 아래 규칙으로 교환하여 누르시오:\n\n` +
+                        `• 🔴 RED  ➔ 🟢 GREEN 버튼으로 누름\n` +
+                        `• 🔵 BLUE ➔ 🔴 RED 버튼으로 누름\n` +
+                        `• 🟢 GREEN ➔ 🔵 BLUE 버튼으로 누름`;
+                } else {
+                    if (!flags.hasPhotoB) {
+                        flags.hasPhotoB = true;
+                        showTempMessage("지하실 오염된 바닥 틈새에서 [찢어진 사진 조각 B]를 발견했다!");
+                        checkPhotoCombine();
+                    } else {
+                        showTempMessage("지하실 오염된 바닥이다.");
+                    }
+                }
+                return;
+            }
+
+            // 철창 진짜 리락쿠마
+            if (x >= 620 && x <= 740 && y >= 220 && y <= 380) {
+                if (!flags.hasRealRilakkuma) {
+                    if (inventory.includes('Dango')) {
+                        flags.hasRealRilakkuma = true;
+                        flags.hasExitKey = true;
+                        inventory.push('ExitKey');
+                        showTempMessage("진짜 리락쿠마에게 경단을 주어 구출 성공!\n황금 탈출 열쇠를 얻었습니다!");
+                    } else {
+                        showTempMessage("진짜 리락쿠마가 철창에 갇혀 지쳐있습니다. 경단이 필요합니다.");
+                    }
+                } else {
+                    showTempMessage("구출된 진짜 리락쿠마가 당신을 따릅니다.");
+                }
+                return;
+            }
+
+            // 가짜 인형 #2
+            if (x >= 50 && x <= 120 && y >= 250 && y <= 320) {
+                triggerJumpscare(180, "섬뜩한 가짜 인형을 만지자 환각이 덮쳤다! 남은 시간 -3분!");
+                return;
+            }
+        }
+    }
+
+    function checkPhotoCombine() {
+        if (flags.hasPhotoA && flags.hasPhotoB && !inventory.includes('CombinedPhoto')) {
+            inventory.push('CombinedPhoto');
+            activeOverlay = 'INSPECT';
+            overlayText = `[사진 조각 결합 완료]\n\n` +
+                `사진을 합치자 혈서 숫자가 완성되었습니다:\n` +
+                `  [ 8 - 3 - 1 - 5 ]\n\n` +
+                `※ 사진 뒷면의 경고:\n` +
+                `"거울 속 세상처럼 숫자를 반대로(뒤집어서) 입력하라!"\n` +
+                `➔ 최종 비밀번호: [ 5 - 1 - 3 - 8 ]`;
+        }
+    }
+
+    function handleOverlayClick(x, y) {
+        if (x >= 650 && x <= 690 && y >= 110 && y <= 150 && activeOverlay !== 'MENU') {
+            activeOverlay = null;
+            return;
+        }
+
+        if (activeOverlay === 'MENU') {
+            if (x >= 280 && x <= 620 && y >= 190 && y <= 240) {
+                isMuted = !isMuted;
+                if (isMuted) audioBgm.pause();
+                return;
+            }
+            if (x >= 280 && x <= 620 && y >= 260 && y <= 310) {
+                activeOverlay = null;
+                isPaused = false;
+                playBgm();
+                return;
+            }
+            if (x >= 280 && x <= 620 && y >= 330 && y <= 380) {
+                activeOverlay = null;
+                isPaused = false;
+                gameState = 'HOME';
+                currentRound = 1;
+                stopBgm();
+                return;
+            }
+        }
+
+        // Round 1 & Round 3 Numpad Lock
+        if (activeOverlay === 'KEYPAD') {
+            const buttons = [
+                { num: '1', x: 340, y: 220 }, { num: '2', x: 420, y: 220 }, { num: '3', x: 500, y: 220 },
+                { num: '4', x: 340, y: 280 }, { num: '5', x: 420, y: 280 }, { num: '6', x: 500, y: 280 },
+                { num: '7', x: 340, y: 340 }, { num: '8', x: 420, y: 340 }, { num: '9', x: 500, y: 340 },
+                { num: 'C', x: 340, y: 400 }, { num: '0', x: 420, y: 400 }, { num: 'OK', x: 500, y: 400 }
+            ];
+
+            // Round 1: 직접 조합 수식 계산 ➔ r1Passcode ("2912")
+            // Round 3: 8315 원본에서 거울 반전(뒤집기) 규칙 적용 ➔ "5138"
+            const correctCode = currentRound === 1 ? r1Passcode : "5138";
+
+            for (let btn of buttons) {
+                if (x >= btn.x && x <= btn.x + 60 && y >= btn.y && y <= btn.y + 50) {
+                    if (btn.num === 'C') {
+                        enteredPasscode = "";
+                    } else if (btn.num === 'OK') {
+                        if (enteredPasscode === correctCode) {
+                            flags.basementBoxUnlocked = true;
+                            flags.hasDango = true;
+                            inventory.push('Dango');
+                            activeOverlay = null;
+                            showTempMessage("정답! 단서와 수식을 바르게 조합하여 상자가 열리고 경단을 얻었습니다!");
+                        } else {
+                            enteredPasscode = "";
+                            triggerJumpscare(90, "암호 조합 계산이 틀렸습니다! 보안 트랩 발동!");
+                        }
+                    } else {
+                        if (enteredPasscode.length < 4) {
+                            enteredPasscode += btn.num;
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Round 2 Color Pad Lock
+        if (activeOverlay === 'COLOR_PAD') {
+            const colorBtns = [
+                { color: 'RED', x: 280, y: 240, w: 100, h: 80, bg: '#cc2222' },
+                { color: 'GREEN', x: 400, y: 240, w: 100, h: 80, bg: '#22cc22' },
+                { color: 'BLUE', x: 520, y: 240, w: 100, h: 80, bg: '#2222cc' }
+            ];
+
+            colorBtns.forEach(btn => {
+                if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+                    round2ColorInputs.push(btn.color);
+                    if (round2ColorInputs.length === 3) {
+                        // 액자 원본: RED -> BLUE -> GREEN
+                        // 치환 규칙: RED➔GREEN, BLUE➔RED, GREEN➔BLUE
+                        // 치환된 최종 버튼 순서: GREEN -> RED -> BLUE
+                        if (round2ColorInputs[0] === 'GREEN' && round2ColorInputs[1] === 'RED' && round2ColorInputs[2] === 'BLUE') {
+                            flags.basementBoxUnlocked = true;
+                            flags.hasDango = true;
+                            inventory.push('Dango');
+                            activeOverlay = null;
+                            showTempMessage("치환 법칙에 맞춰 올바른 3색 버튼을 눌렀습니다!\n상자가 열리고 경단을 얻었습니다!");
+                        } else {
+                            round2ColorInputs = [];
+                            triggerJumpscare(90, "색상 치환 순서가 틀렸습니다! 경고 트랩 발동!");
+                        }
+                    }
+                }
+            });
+
+            if (x >= 380 && x <= 520 && y >= 350 && y <= 390) {
+                round2ColorInputs = [];
+            }
+        }
+
+        if (activeOverlay === 'DOOR_LOCK') {
+            if (x >= 380 && x <= 520 && y >= 320 && y <= 370) {
+                if (inventory.includes('ExitKey') && flags.hasRealRilakkuma) {
+                    activeOverlay = null;
+                    triggerClear();
+                } else {
+                    showTempMessage("탈출 불가능! [진짜 리락쿠마] 구출 및 [황금 열쇠] 소지가 필요합니다.");
+                }
+            }
+        }
+
+        if (activeOverlay === 'INSPECT' || activeOverlay === 'MESSAGE') {
+            if (x >= 350 && x <= 550 && y >= 400 && y <= 450) activeOverlay = null;
+        }
+    }
+
+    function showTempMessage(msg) {
+        activeOverlay = 'MESSAGE';
+        overlayText = msg;
+    }
+
+    function gameLoop() {
+        updatePointerMovement();
+        render();
+        requestAnimationFrame(gameLoop);
+    }
+
+    // Canvas Render Helpers
+    function drawRilakkumaSprite(x, y, isFake = false) {
+        if (isRilakkumaImgLoaded) {
+            try {
+                ctx.drawImage(rilakkumaImg, x - 25, y - 30, 50, 60);
+                return;
+            } catch(e) {}
+        }
+
+        ctx.save();
+        ctx.translate(x - 25, y - 30);
+        ctx.fillStyle = isFake ? "#4a3b32" : "#8B5A2B";
+        ctx.beginPath();
+        ctx.ellipse(25, 38, 20, 20, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = isFake ? "#8a1c1c" : "#FFF8DC";
+        ctx.beginPath();
+        ctx.ellipse(25, 40, 11, 13, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = isFake ? "#4a3b32" : "#8B5A2B";
+        ctx.beginPath();
+        ctx.ellipse(25, 20, 22, 17, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = isFake ? "#ff0000" : "#FFC0CB";
+        ctx.beginPath();
+        ctx.arc(8, 9, 4, 0, Math.PI * 2);
+        ctx.arc(42, 9, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#111";
+        ctx.beginPath();
+        ctx.arc(17, 18, 2.5, 0, Math.PI * 2);
+        ctx.arc(33, 18, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (gameState === 'HOME') { renderHomeScreen(); return; }
+        if (gameState === 'GAMEOVER') { renderGameOverScreen(); return; }
+        if (gameState === 'CLEAR') { renderClearScreen(); return; }
+        if (gameState === 'FINAL_CLEAR') { renderFinalClearScreen(); return; }
+
+        if (currentRoom === 1) renderRoom1();
+        else if (currentRoom === 2) renderRoom2();
+        else if (currentRoom === 3) renderRoom3();
+
+        renderAtmosphereOverlay();
+        renderHUD();
+
+        if (activeOverlay) { renderOverlay(); }
+
+        renderFingerPointer();
+        renderMenuButton();
+    }
+
+    function renderMenuButton() {
+        ctx.save();
+        ctx.fillStyle = "rgba(25, 10, 10, 0.85)";
+        ctx.strokeStyle = "#5a2a2a";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(835, 15, 50, 40, 6);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.font = "bold 16px sans-serif";
+        ctx.fillStyle = "#ffaaaa";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("⚙️메뉴", 860, 35);
+        ctx.restore();
+    }
+
+    function renderHomeScreen() {
+        ctx.fillStyle = "#050203";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        let grad = ctx.createRadialGradient(450, 300, 40, 450, 300, 480);
+        grad.addColorStop(0, "rgba(90, 10, 10, 0.4)");
+        grad.addColorStop(1, "rgba(0, 0, 0, 0.98)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#8b0000";
+        ctx.font = "bold 54px monospace";
+        ctx.textAlign = "center";
+        ctx.shadowColor = "#ff0000";
+        ctx.shadowBlur = 20;
+        ctx.fillText("리락쿠마의 방탈출", 450, 200);
+        ctx.shadowBlur = 0;
+
+        ctx.fillStyle = "#e1d7bd";
+        ctx.font = "bold 28px monospace";
+        ctx.fillText(`Round ${currentRound} / 3`, 450, 270);
+
+        ctx.fillStyle = "#2a0a0a";
+        ctx.strokeStyle = "#8b0000";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.roundRect(350, 380, 200, 60, 8);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#ff4d4d";
+        ctx.font = "bold 24px sans-serif";
+        ctx.fillText("시 작", 450, 418);
+
+        ctx.fillStyle = "#887777";
+        ctx.font = "14px sans-serif";
+        ctx.fillText("[ Enter ] 키를 누르면 바로 시작합니다", 450, 470);
+    }
+
+    function renderGameOverScreen() {
+        ctx.fillStyle = "#050000";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#ff0000";
+        ctx.font = "bold 60px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("GAME OVER", 450, 220);
+
+        ctx.fillStyle = "#a89f91";
+        ctx.font = "20px sans-serif";
+        ctx.fillText("기괴한 어둠 속에서 탈출하지 못했습니다...", 450, 290);
+
+        ctx.fillStyle = "#ff4d4d";
+        ctx.font = "bold 22px sans-serif";
+        ctx.fillText("Press [ SPACE ] to Go Home", 450, 410);
+    }
+
+    function renderClearScreen() {
+        ctx.fillStyle = "#030c03";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#4dff4d";
+        ctx.font = "bold 52px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(`ROUND ${currentRound} CLEAR!`, 450, 220);
+
+        ctx.fillStyle = "#d1c7bd";
+        ctx.font = "20px sans-serif";
+        ctx.fillText(`Round ${currentRound}을 무사히 탈출했습니다!`, 450, 290);
+
+        ctx.fillStyle = "#66ff66";
+        ctx.font = "bold 22px sans-serif";
+        ctx.fillText(`Press [ SPACE ] for Round ${currentRound + 1}`, 450, 410);
+    }
+
+    function renderFinalClearScreen() {
+        ctx.fillStyle = "#021202";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#ffff55";
+        ctx.font = "bold 56px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("🎉 ALL ROUND CLEAR! 🎉", 450, 200);
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "22px sans-serif";
+        ctx.fillText("모든 추론 퍼즐을 풀고 방을 완벽히 탈출했습니다!", 450, 280);
+        ctx.fillText("진짜 리락쿠마와 함께 안전한 곳으로 떠납니다.", 450, 320);
+
+        ctx.fillStyle = "#ffff88";
+        ctx.font = "bold 22px sans-serif";
+        ctx.fillText("Press [ SPACE ] to Go Home", 450, 420);
+    }
+
+    function renderRoom1() {
+        ctx.fillStyle = "#1a1212";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#2b1a17";
+        ctx.strokeStyle = "#4a2e2b";
+        ctx.lineWidth = 4;
+        ctx.fillRect(380, 160, 140, 260);
+        ctx.strokeRect(380, 160, 140, 260);
+
+        ctx.fillStyle = "#ff3333";
+        ctx.font = "bold 14px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("EXIT", 450, 190);
+
+        ctx.fillStyle = "#150d18";
+        ctx.fillRect(800, 200, 80, 250);
+        ctx.fillStyle = "#aa88aa";
+        ctx.fillText("서재▶", 840, 320);
+
+        ctx.fillStyle = "#18100d";
+        ctx.fillRect(20, 360, 100, 100);
+        ctx.fillStyle = "#aa9988";
+        ctx.fillText("지하실▼", 70, 410);
+
+        // Clock
+        ctx.fillStyle = "#221a15";
+        ctx.strokeStyle = "#554433";
+        ctx.beginPath();
+        ctx.arc(610, 130, 25, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Wall Frame
+        ctx.fillStyle = "#251d1d";
+        ctx.fillRect(180, 120, 120, 120);
+        ctx.fillStyle = "#aa7777";
+        ctx.font = "12px sans-serif";
+        if (currentRound === 1) ctx.fillText("UV 비춤 벽면", 240, 180);
+        else if (currentRound === 2) ctx.fillText("🔴🔵🟢 액자", 240, 180);
+        else ctx.fillText("피 흔적 벽", 240, 180);
+
+        drawRilakkumaSprite(715, 420, true);
+    }
+
+    function renderRoom2() {
+        ctx.fillStyle = "#12141a";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#181010";
+        ctx.fillRect(20, 200, 70, 250);
+        ctx.fillStyle = "#aa8888";
+        ctx.textAlign = "center";
+        ctx.fillText("◀거실", 55, 320);
+
+        ctx.fillStyle = "#2a1b12";
+        ctx.fillRect(220, 120, 160, 160);
+        ctx.strokeStyle = "#4a3222";
+        ctx.strokeRect(220, 120, 160, 160);
+        ctx.fillStyle = "#8b0000";
+        ctx.fillRect(260, 150, 25, 100);
+
+        ctx.fillStyle = "#2b1e16";
+        ctx.fillRect(500, 320, 220, 120);
+        ctx.fillStyle = "#1c130e";
+        ctx.fillRect(520, 360, 180, 70);
+    }
+
+    function renderRoom3() {
+        ctx.fillStyle = "#0a0a0d";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#2a1f18";
+        ctx.fillRect(790, 150, 60, 300);
+        ctx.fillStyle = "#bbaa99";
+        ctx.textAlign = "center";
+        ctx.fillText("▲거실", 820, 300);
+
+        ctx.fillStyle = "#1f1f26";
+        ctx.fillRect(150, 350, 170, 110);
+        ctx.fillStyle = "#aaa";
+        ctx.fillText(currentRound === 2 ? "3색 램프 함" : "비밀 상자", 235, 410);
+
+        ctx.fillStyle = "#221111";
+        ctx.fillRect(400, 120, 180, 130);
+        ctx.fillStyle = "#883333";
+        ctx.font = "14px sans-serif";
+        if (currentRound === 1) ctx.fillText("///  ////", 490, 185);
+        else if (currentRound === 2) ctx.fillText("🔴➔🟢 / 🔵➔🔴 / 🟢➔🔵", 490, 185);
+        else ctx.fillText("오염된 바닥", 490, 185);
+
+        ctx.strokeStyle = "#555";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(620, 220, 120, 160);
+        drawRilakkumaSprite(680, 300, false);
+
+        drawRilakkumaSprite(85, 280, true);
+    }
+
+    function renderAtmosphereOverlay() {
+        let grad = ctx.createRadialGradient(pointer.x, pointer.y, 70, pointer.x, pointer.y, 500);
+        grad.addColorStop(0, "rgba(0, 0, 0, 0.05)");
+        grad.addColorStop(0.7, "rgba(0, 0, 0, 0.8)");
+        grad.addColorStop(1, "rgba(0, 0, 0, 0.98)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function renderHUD() {
+        ctx.fillStyle = "rgba(10, 5, 5, 0.85)";
+        ctx.fillRect(10, 10, 200, 40);
+        ctx.strokeStyle = "#3a1e1e";
+        ctx.strokeRect(10, 10, 200, 40);
+
+        const roomNames = { 1: "거실 (Main)", 2: "서재 (Study)", 3: "비밀 지하실 (Basement)" };
+        ctx.fillStyle = "#d1c7bd";
+        ctx.font = "bold 15px sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(roomNames[currentRoom], 25, 35);
+
+        ctx.fillStyle = "rgba(10, 5, 5, 0.85)";
+        ctx.fillRect(350, 10, 200, 40);
+        ctx.strokeStyle = "#3a1e1e";
+        ctx.strokeRect(350, 10, 200, 40);
+
+        const mins = Math.floor(timeRemaining / 60).toString().padStart(2, '0');
+        const secs = (timeRemaining % 60).toString().padStart(2, '0');
+        ctx.fillStyle = timeRemaining < 60 ? "#ff3333" : "#ffb3b3";
+        ctx.font = "bold 20px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(`⏱️ ${mins}:${secs} (R${currentRound})`, 450, 36);
+
+        ctx.fillStyle = "rgba(10, 5, 5, 0.85)";
+        ctx.fillRect(150, 530, 600, 60);
+        ctx.strokeStyle = "#3a2222";
+        ctx.strokeRect(150, 530, 600, 60);
+
+        ctx.fillStyle = "#8a7e72";
+        ctx.font = "12px sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText("소지품:", 160, 548);
+
+        const itemIcons = {
+            'IronKey': '🗝️ 철열쇠',
+            'UVTorch': '🔦 UV후래시',
+            'ColorKey': '🔑 색상열쇠',
+            'CombinedPhoto': '🖼️ 결합사진',
+            'Dango': '🍡 경단',
+            'ExitKey': '🔑 황금열쇠'
+        };
+
+        let slotX = 220;
+        inventory.forEach(item => {
+            ctx.fillStyle = "#ffd700";
+            ctx.font = "bold 13px sans-serif";
+            ctx.fillText(itemIcons[item] || item, slotX, 566);
+            slotX += 110;
+        });
+    }
+
+    function renderOverlay() {
+        if (activeOverlay === 'JUMPSCARE') {
+            jumpscareTimer--;
+            jumpscareScale = Math.min(2.5, jumpscareScale + 0.15);
+            shakeOffset.x = (Math.random() - 0.5) * 20;
+            shakeOffset.y = (Math.random() - 0.5) * 20;
+
+            ctx.save();
+            ctx.translate(shakeOffset.x, shakeOffset.y);
+            ctx.fillStyle = "#330000";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.translate(450, 300);
+            ctx.scale(jumpscareScale, jumpscareScale);
+            drawRilakkumaSprite(0, 0, true);
+            ctx.restore();
+
+            if (jumpscareTimer <= 0) { showTempMessage(overlayText); }
+            return;
+        }
+
+        ctx.fillStyle = "rgba(0, 0, 0, 0.88)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#181214";
+        ctx.strokeStyle = "#4a2a2a";
+        ctx.lineWidth = 3;
+        ctx.fillRect(200, 80, 500, 420);
+        ctx.strokeRect(200, 80, 500, 420);
+
+        if (activeOverlay !== 'MENU') {
+            ctx.fillStyle = "#ff4d4d";
+            ctx.font = "bold 22px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("✖", 670, 115);
+        }
+
+        if (activeOverlay === 'MENU') {
+            ctx.fillStyle = "#ff8888";
+            ctx.font = "bold 28px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("⚙️ 게임 메뉴", 450, 140);
+
+            const opts = [
+                { text: isMuted ? "🔊 소리 켜기" : "🔇 소리 끄기", y: 190 },
+                { text: "▶️ 게임 재개 (일시정지 해제)", y: 260 },
+                { text: "🏠 홈화면으로 돌아가기", y: 330 }
+            ];
+
+            opts.forEach(opt => {
+                ctx.fillStyle = "#2e1a1a";
+                ctx.strokeStyle = "#6a3a3a";
+                ctx.fillRect(280, opt.y, 340, 50);
+                ctx.strokeRect(280, opt.y, 340, 50);
+
+                ctx.fillStyle = "#ffffff";
+                ctx.font = "bold 18px sans-serif";
+                ctx.fillText(opt.text, 450, opt.y + 32);
+            });
+        }
+
+        if (activeOverlay === 'KEYPAD') {
+            ctx.fillStyle = "#d1c7bd";
+            ctx.font = "bold 22px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(`상자 비밀번호 (4자리)`, 450, 130);
+
+            ctx.fillStyle = "#050a05";
+            ctx.fillRect(340, 150, 220, 45);
+            ctx.strokeStyle = "#114411";
+            ctx.strokeRect(340, 150, 220, 45);
+
+            ctx.fillStyle = "#00ff00";
+            ctx.font = "bold 24px monospace";
+            ctx.fillText(enteredPasscode.padStart(4, '_'), 450, 182);
+
+            const buttons = [
+                { num: '1', x: 340, y: 220 }, { num: '2', x: 420, y: 220 }, { num: '3', x: 500, y: 220 },
+                { num: '4', x: 340, y: 280 }, { num: '5', x: 420, y: 280 }, { num: '6', x: 500, y: 280 },
+                { num: '7', x: 340, y: 340 }, { num: '8', x: 420, y: 340 }, { num: '9', x: 500, y: 340 },
+                { num: 'C', x: 340, y: 400 }, { num: '0', x: 420, y: 400 }, { num: 'OK', x: 500, y: 400 }
+            ];
+
+            buttons.forEach(btn => {
+                ctx.fillStyle = "#2a1e1e";
+                ctx.strokeStyle = "#5a3e3e";
+                ctx.fillRect(btn.x, btn.y, 60, 50);
+                ctx.strokeRect(btn.x, btn.y, 60, 50);
+
+                ctx.fillStyle = "#ffffff";
+                ctx.font = "bold 18px sans-serif";
+                ctx.fillText(btn.num, btn.x + 30, btn.y + 32);
+            });
+        }
+
+        if (activeOverlay === 'COLOR_PAD') {
+            ctx.fillStyle = "#d1c7bd";
+            ctx.font = "bold 22px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(`3색 램프 제어함 (치환 순서 입력)`, 450, 130);
+
+            ctx.font = "16px sans-serif";
+            ctx.fillText(`입력 진행: ${round2ColorInputs.join(' ➔ ') || '대기 중'}`, 450, 180);
+
+            const colorBtns = [
+                { name: '🔴 RED', x: 280, y: 240, w: 100, h: 70, bg: '#882222' },
+                { name: '🟢 GREEN', x: 400, y: 240, w: 100, h: 70, bg: '#228822' },
+                { name: '🔵 BLUE', x: 520, y: 240, w: 100, h: 70, bg: '#222288' }
+            ];
+
+            colorBtns.forEach(btn => {
+                ctx.fillStyle = btn.bg;
+                ctx.strokeStyle = "#ffffff";
+                ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+                ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+
+                ctx.fillStyle = "#ffffff";
+                ctx.font = "bold 15px sans-serif";
+                ctx.fillText(btn.name, btn.x + 50, btn.y + 40);
+            });
+
+            ctx.fillStyle = "#3a2a2a";
+            ctx.fillRect(380, 350, 140, 40);
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "14px sans-serif";
+            ctx.fillText("초기화", 450, 375);
+        }
+
+        if (activeOverlay === 'DOOR_LOCK') {
+            ctx.fillStyle = "#d1c7bd";
+            ctx.font = "bold 24px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("탈출 문 잠금장치", 450, 150);
+            ctx.font = "16px sans-serif";
+            ctx.fillText("황금 열쇠와 구해낸 진짜 리락쿠마가 필요합니다.", 450, 220);
+
+            ctx.fillStyle = "#3a1a1a";
+            ctx.strokeStyle = "#8a2a2a";
+            ctx.fillRect(380, 320, 140, 50);
+            ctx.strokeRect(380, 320, 140, 50);
+
+            ctx.fillStyle = "#ff6666";
+            ctx.font = "bold 18px sans-serif";
+            ctx.fillText("문 열기", 450, 352);
+        }
+
+        if (activeOverlay === 'INSPECT' || activeOverlay === 'MESSAGE') {
+            ctx.fillStyle = "#d1c7bd";
+            ctx.font = "16px sans-serif";
+            ctx.textAlign = "center";
+
+            const lines = overlayText.split('\n');
+            let lineY = 160;
+            lines.forEach(line => {
+                ctx.fillText(line, 450, lineY);
+                lineY += 32;
+            });
+
+            ctx.fillStyle = "#2a1a1a";
+            ctx.fillRect(370, 400, 160, 45);
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 16px sans-serif";
+            ctx.fillText("확인", 450, 428);
+        }
+    }
+
+    function renderFingerPointer() {
+        ctx.save();
+        ctx.font = "28px sans-serif";
+        ctx.shadowColor = "rgba(255, 0, 0, 0.8)";
+        ctx.shadowBlur = 8;
+        ctx.fillText("👆", pointer.x, pointer.y);
+        ctx.restore();
+    }
+
+    requestAnimationFrame(gameLoop);
+})();
+</script>
+</body>
+</html>
